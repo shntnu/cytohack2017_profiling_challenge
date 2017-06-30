@@ -1,0 +1,148 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r libraries, include=FALSE, message=FALSE}
+library(ggplot2)
+library(caret)
+library(magrittr)
+library(dplyr)
+library(tidyverse)
+library(stringr)
+library(foreach)
+library(doMC)
+library(corrplot)
+```
+
+```{r input data}
+profiles <- 
+  list.files("../bbbc022/", 
+          pattern = "*_augmented.csv",
+          recursive = T,
+          full.names = T) %>%
+  map_df(read_csv)
+
+dim(profiles)
+
+variables <-
+  names(profiles) %>% str_subset("^Cells_|^Cytoplasm_|^Nuclei_")
+
+metadata <-
+  names(profiles) %>% str_subset("^Metadata_")
+
+
+
+```
+
+```{r preprocessing}
+# remove zero variance data
+profiles %<>%
+  cytominer::select(
+    sample = 
+      profiles %>% 
+      filter(Metadata_pert_type == "control"),
+    variables = variables,
+    operation = "variance_threshold"
+  )
+
+variables <-
+  names(profiles) %>% str_subset("^Cells_|^Cytoplasm_|^Nuclei_")
+
+
+# remove features that are too correlated (threshold of .9)
+profiles %<>%
+  cytominer::select(
+    sample = profiles,
+    variables = variables,
+    operation = "correlation_threshold"
+  )
+
+#%>%filter(Metadata_pert_type == "control"),
+
+variables <-
+  names(profiles) %>% str_subset("^Cells_|^Cytoplasm_|^Nuclei_")
+
+# remove controls
+#profiles %<>% filter(!Metadata_broad_sample %in% "DMSO") 
+
+```
+
+```{r hit}
+# number of CPU cores for parallelization
+registerDoMC(7)
+
+# find the different compounds
+IDs <- unique(profiles$Metadata_broad_sample)
+
+## Correlation of the data
+comp.cor.median <- foreach(i = 1:length(IDs), .combine=cbind) %dopar% {
+  
+  #filtering to choose only for one compound
+  comp <- filter(profiles, Metadata_broad_sample %in% IDs[i])
+  comp <-
+    comp[, variables] %>%
+    as.matrix()
+  
+  # correlation of the features
+  comp.cor <- cor(t(comp), method = "pearson")
+  
+  # save median of the correlation
+  comp.cor.median <- median(comp.cor[lower.tri(comp.cor)],na.rm=TRUE) # 1600 values
+  
+}
+
+```
+
+```{r plot hist}
+hist(comp.cor.median,
+       main="Histogram for Median Replicate Correlation",
+       xlab="Median Replicate Correlation", xlim = range(-1, 1))
+
+```
+
+```{r feature selection}
+cor_features <- cor(profiles %>% select(one_of(variables)))
+
+
+corrplot::corrplot(cor_features, tl.cex = 0.5, method = "color",  tl.pos="n")
+
+```
+
+```{r profiles}
+profile_maker <- function(pf){ 
+
+  # Metadata
+  metadata <-
+    names(pf) %>% str_subset("^Metadata_")
+  
+  # Variables
+  variables <-
+    names(pf) %>% str_subset("^Cells_|^Cytoplasm_|^Nuclei_")
+
+  # average along replicate (keep only id and variables)
+  signature <- 
+    pf %>% 
+    select(one_of(variables, 'Metadata_broad_sample')) %>%
+    group_by(Metadata_broad_sample) %>% 
+    summarise_all(funs(mean(., na.rm=TRUE)))
+  
+  # add metadata information
+  signature %<>%
+    left_join(., pf %>% select(one_of(metadata)), by = 'Metadata_broad_sample') %>%
+    group_by(Metadata_broad_sample) %>%
+    slice(1)
+  
+  return(signature)
+}
+
+final_profile <- profile_maker(profiles)
+
+write.csv(final_profile, file = "profile.csv")
+
+```
+
+
+
+
+
